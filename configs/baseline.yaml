@@ -1,0 +1,14 @@
+label: "Baseline Alpamayo script 100 iterations"
+model:
+  model_name: "nvidia/Alpamayo-R1-10B"
+  quantization: null
+  device: "cuda"
+
+inputs:
+  clip_id: '030c760c-ae38-49aa-9ad8-f5650a545d26'
+  batch_size: 1
+  seq_length: 512
+
+benchmark:
+  iter: 100 
+  warm: 10

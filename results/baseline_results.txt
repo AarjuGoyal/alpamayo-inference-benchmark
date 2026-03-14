@@ -1,0 +1,14 @@
+Results for Baseline Alpamayo script 100 iterations
+mean: 1321.59ms
+
+std: 58.55ms
+
+p50: 1329.41ms
+
+p95: 1417.09ms
+
+p99: 1422.22ms
+
+min: 1136.41ms
+
+max: 1433.22ms

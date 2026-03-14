@@ -1,0 +1,8 @@
+#Core dependencies
+torch>=2.8.0
+transformers>=4.57.1
+numpy>=2.3.5
+pyyaml>=6.0.3
+
+# Alpamayo dependencies (users need to install separately)
+# See: https://github.com/NVlabs/alpamayo for setup instructions
