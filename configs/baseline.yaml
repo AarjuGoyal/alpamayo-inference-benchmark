@@ -1,14 +1,17 @@
 label: "Baseline Alpamayo script 100 iterations"
 model:
-  model_name: "nvidia/Alpamayo-R1-10B"
+  model_name: "nvidia/Alpamayo-1.5-10B"
   quantization: null
   device: "cuda"
+  register_hooks: true #Should match the print_comp_profile arguments
 
 inputs:
-  clip_id: '030c760c-ae38-49aa-9ad8-f5650a545d26'
+  clip_id: '65c12666-3a74-4cc2-939c-fa1a7d0c8606'
   batch_size: 1
   seq_length: 512
 
-benchmark:
-  iter: 100 
+benchmark: 
+  iter: 50
   warm: 10
+  print_error: true
+  print_comp_profile: false

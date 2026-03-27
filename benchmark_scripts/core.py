@@ -26,14 +26,59 @@
 import torch
 import numpy as np
 
-from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
-from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
-from alpamayo_r1 import helper
+from alpamayo1_5 import helper
+from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
+from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
+import time
+import inspect
 
-def load_model(model_name, quantization=None, device="cuda"):
-    model = AlpamayoR1.from_pretrained(model_name, dtype=torch.bfloat16).to(device)
+timings = {} #used only for generating layer wise results
+handles = []
+def load_model(model_name, quantization=None, device="cuda", register_hooks=False):
+    model = Alpamayo1_5.from_pretrained(model_name, dtype=torch.bfloat16).to(device)
     processor = helper.get_processor(model.tokenizer)
+    
+    # # Check what methods diffusion module has
+    # print([m for m in dir(model.diffusion) if not m.startswith('_')])
+
+    # # And action_space
+    # print([m for m in dir(model.action_space) if not m.startswith('_')])
+
+    # print(inspect.getsource(model.forward))
+    # print(inspect.getsource(type(model)))
+    if register_hooks == True:
+        def make_hook(name):
+            def hook(module, input, output):
+                torch.cuda.synchronize()
+                timings[name]['end'] = time.perf_counter()
+                timings[name]['ms'] = (timings[name]['end'] - timings[name]['start']) * 1000
+                # print(f"hook fired: {name}")  # temporary debug
+            return hook
+
+        def make_pre_hook(name):
+            def hook(module, input):
+                torch.cuda.synchronize()
+                timings[name] = {'start': time.perf_counter()}
+            return hook
+
+        # Register on top-level components
+        components = {
+            'vision': model.vlm.model.visual,
+            'language_model': model.vlm.model.language_model,
+            'vlm': model.vlm.lm_head,
+            'expert': model.expert,
+            'diffusion': model.diffusion,
+            'action_space': model.action_space,
+            'action_in_proj': model.action_in_proj,
+            'action_out_proj': model.action_out_proj,
+        }
+
+        
+        for name, module in components.items():
+            handles.append(module.register_forward_pre_hook(make_pre_hook(name)))
+            handles.append(module.register_forward_hook(make_hook(name)))
     return model, processor
+
 
 def load_dataset(processor, clip_id):
 
@@ -64,7 +109,7 @@ def prepare_inputs(inputs, data):
     model_inputs = helper.to_device(model_inputs, "cuda")
     return model_inputs
 
-def measure_latency(model, inputs, data, iter = 100, warm = 10):
+def measure_latency(model, inputs, data, iter = 100, warm = 10, print_error=False, print_comp_profile=False):
     
     
     torch.cuda.manual_seed_all(42)
@@ -77,7 +122,7 @@ def measure_latency(model, inputs, data, iter = 100, warm = 10):
     for _ in range(warm):
         model_inputs = prepare_inputs(inputs, data)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            model.sample_trajectories_from_data_with_vlm_rollout(
+            _ = model.sample_trajectories_from_data_with_vlm_rollout(
                 data=model_inputs,
                 top_p=0.98,
                 temperature=0.6,
@@ -119,6 +164,15 @@ def measure_latency(model, inputs, data, iter = 100, warm = 10):
         if i % 10 == 0:
             print(f"Finished iteration {i}")
             print(f"Operation took: {elapsed_time_ms} ms")
+            if print_error==True:
+                min_ade = measure_error(pred_xyz=pred_xyz, pred_rot=pred_rot,extra=extra, data=data)
+                print(f"minADE: {min_ade}")
+            if print_comp_profile==True:
+                for name, t in timings.items():
+                    print(f"{name:20s}: {t['ms']:.1f}ms")
+                for h in handles:
+                    h.remove()
+                print_comp_profile = False
     
     return {
         "mean": np.mean(latency_list),
@@ -133,15 +187,67 @@ def measure_latency(model, inputs, data, iter = 100, warm = 10):
 
 def measure_error(pred_xyz, pred_rot, extra, data):
     # the size is [batch_size, num_traj_sets, num_traj_samples]
-    print("Chain-of-Causation (per trajectory):\n", extra["cot"][0])
+    for i, ele in enumerate(extra["cot"]):
+        print(f"Chain-of-Causation, trajectory {i} is {ele}\n")
 
     gt_xy = data["ego_future_xyz"].cpu()[0, 0, :, :2].T.numpy()
     pred_xy = pred_xyz.cpu().numpy()[0, 0, :, :, :2].transpose(0, 2, 1)
     diff = np.linalg.norm(pred_xy - gt_xy[None, ...], axis=1).mean(-1)
     min_ade = diff.min()
-    print("minADE:", min_ade, "meters")
-    print(
-        "Note: VLA-reasoning models produce nondeterministic outputs due to trajectory sampling, "
-        "hardware differences, etc. With num_traj_samples=1 (set for GPU memory compatibility), "
-        "variance in minADE is expected. For visual sanity checks, see notebooks/inference.ipynb"
+    return min_ade
+
+#Measure timing of different components
+def timed_inference(model, inputs, data, **kwargs):
+    timings = {}
+    original_generate = model.vlm.generate
+    def timed_generate(*args, **kwargs):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        result = original_generate(*args, **kwargs)
+        torch.cuda.synchronize()
+        timings['vlm_generate'] = (time.perf_counter() - t0) * 1000
+        return result
+    model.vlm.generate = timed_generate
+
+    # Patch diffusion.sample
+    original_diffusion_sample = model.diffusion.sample
+    def timed_diffusion_sample(*args, **kwargs):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        result = original_diffusion_sample(*args, **kwargs)
+        torch.cuda.synchronize()
+        timings['diffusion_sample'] = (time.perf_counter() - t0) * 1000
+        return result
+    model.diffusion.sample = timed_diffusion_sample
+
+    # Patch action_space.action_to_traj
+    original_action_to_traj = model.action_space.action_to_traj
+    def timed_action_to_traj(*args, **kwargs):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        result = original_action_to_traj(*args, **kwargs)
+        torch.cuda.synchronize()
+        timings['action_to_traj'] = (time.perf_counter() - t0) * 1000
+        return result
+    model.action_space.action_to_traj = timed_action_to_traj
+    model_inputs = prepare_inputs(inputs, data)
+
+    torch.cuda.synchronize()
+    t_total = time.perf_counter()
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        output = model.sample_trajectories_from_data_with_vlm_rollout(data=model_inputs, **kwargs)
+    torch.cuda.synchronize()
+    timings['total'] = (time.perf_counter() - t_total) * 1000
+
+    # Restore originals
+    model.vlm.generate = original_generate
+    model.diffusion.sample = original_diffusion_sample
+    model.action_space.action_to_traj = original_action_to_traj
+
+    # Derived: everything not accounted for
+    timings['other'] = timings['total'] - sum(
+        v for k, v in timings.items() 
+        if k not in ('total',)
     )
+
+    return output, timings
