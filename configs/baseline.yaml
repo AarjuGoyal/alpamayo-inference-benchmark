@@ -14,4 +14,3 @@ benchmark:
   iter: 50
   warm: 10
   print_error: true
-  print_comp_profile: false

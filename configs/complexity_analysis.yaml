@@ -1,0 +1,20 @@
+label: "Analysis of impact of complexity on timings of different layers"
+model:
+  model_name: "nvidia/Alpamayo-1.5-10B"
+  quantization: null
+  device: "cuda"
+
+inputs:
+  clip_csv: 'complexity_score.csv'
+  batch_size: 1
+  seq_length: 512
+
+benchmark: 
+  iter: 10
+  warm: 0
+  print_error: false
+
+results:
+  results_csv: "timing_iter.csv"
+  profile_summary_csv: "profile_summary.csv"
+  
