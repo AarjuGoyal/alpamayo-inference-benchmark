@@ -31,7 +31,7 @@ from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
 from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
 import time
 import inspect
-
+import torch.cuda.nvtx as nvtx
 timings = {} #used only for generating layer wise results
 handles = []
 def load_model(model_name, quantization=None, device="cuda", register_hooks=False):
@@ -161,14 +161,18 @@ def timed_inference(model, inputs, data, **kwargs):
         prefill_done = [False]
         def timed_forward(*a, **kw):
             if not prefill_done[0]:
+                nvtx.range_push("prefill")
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
                 result = original_forward(*a, **kw)
                 torch.cuda.synchronize()
                 timings['prefill'] = (time.perf_counter() - t0) * 1000
+                nvtx.range_pop()
                 prefill_done[0] = True
             else:
+                nvtx.range_push("autoregressive decode")
                 result = original_forward(*a, **kw)
+                nvtx.range_pop()
             return result
         
         model.vlm.model.forward = timed_forward
@@ -185,32 +189,38 @@ def timed_inference(model, inputs, data, **kwargs):
     # Patch diffusion.sample
     original_diffusion_sample = model.diffusion.sample
     def timed_diffusion_sample(*args, **kwargs):
+        nvtx.range_push("diffusion sample")
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         result = original_diffusion_sample(*args, **kwargs)
         torch.cuda.synchronize()
         timings['diffusion_sample'] = (time.perf_counter() - t0) * 1000
+        nvtx.range_pop()
         return result
     model.diffusion.sample = timed_diffusion_sample
 
     # Patch action_space.action_to_traj
     original_action_to_traj = model.action_space.action_to_traj
     def timed_action_to_traj(*args, **kwargs):
+        nvtx.range_push("action_to_traj")
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         result = original_action_to_traj(*args, **kwargs)
         torch.cuda.synchronize()
         timings['action_to_traj'] = (time.perf_counter() - t0) * 1000
+        nvtx.range_pop()
         return result
     model.action_space.action_to_traj = timed_action_to_traj
     model_inputs = prepare_inputs(inputs, data)
 
+    nvtx.range_push("total_inference")
     torch.cuda.synchronize()
     t_total = time.perf_counter()
     with torch.autocast("cuda", dtype=torch.bfloat16):
         output = model.sample_trajectories_from_data_with_vlm_rollout(data=model_inputs, **kwargs)
     torch.cuda.synchronize()
     timings['total'] = (time.perf_counter() - t_total) * 1000
+    nvtx.range_pop()
 
     # Restore originals
     model.vlm.generate = original_generate

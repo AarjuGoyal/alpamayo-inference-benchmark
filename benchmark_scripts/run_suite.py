@@ -19,15 +19,20 @@ def output_results(label, results):
     for k, v in results.items():
         print(f"{k}: {v:.2f}ms\n")
 
-def baseline_latency_measurement(config):
-    measure_comp_time = False
+def baseline_latency_measurement(config, measure_comp_time=False):
+    
     model, processor = load_model(**config["model"])
     
     inputs, data = load_dataset(processor,config["inputs"]["clip_id"])
     if measure_comp_time == True:
-        output, timings = timed_inference(model, inputs, data)
+        _ = measure_latency(model,inputs, data,1,20, False) #Warm up
+        output, timings = timed_inference(model, inputs, data, top_p=0.98,
+                temperature=0.6,
+                num_traj_samples=1,  # Feel free to raise this for more output trajectories and CoC traces.
+                max_generation_length=256,
+                return_extra=True)
         print(f"The timings are {timings}")
-        print(f"Output is {output}")
+        # print(f"Output is {output}")
     else:
         results = measure_latency(model,inputs, data, **config["benchmark"])
         output_results(label=config["label"], results=results)
@@ -130,8 +135,8 @@ def generate_profile_results(config):
 if __name__ == "__main__":
     args = parse_args()
     config = yaml.safe_load(open(args.config))
-    # baseline_latency_measurement(config)
-    complexity_profiling(config)
-    generate_profile_results(config)
+    baseline_latency_measurement(config=config, measure_comp_time=True)
+    # complexity_profiling(config)
+    # generate_profile_results(config)
     # measure_error(pred_xyz, pred_rot, extra, data)
 
